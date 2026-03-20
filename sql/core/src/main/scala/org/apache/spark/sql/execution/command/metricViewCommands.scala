@@ -23,7 +23,10 @@ import org.apache.spark.sql.catalyst.{QueryPlanningTracker, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis.{ResolvedIdentifier, SchemaUnsupported}
 import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.connector.catalog.CatalogV2Util
+import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.errors.QueryCompilationErrors
+import org.apache.spark.sql.metricview.serde.{AssetSource, MetricViewFactory}
 import org.apache.spark.sql.metricview.util.MetricViewPlanner
 import org.apache.spark.sql.types.StructType
 
@@ -39,13 +42,21 @@ case class CreateMetricViewCommand(
   import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
-    val catalog = sparkSession.sessionState.catalog
-    val name = child match {
+    child match {
+      case v: ResolvedIdentifier if !CatalogV2Util.isSessionCatalog(v.catalog) =>
+        createMetricViewInV2Catalog(sparkSession, v)
       case v: ResolvedIdentifier =>
-        v.identifier.asTableIdentifier
+        createMetricViewInSessionCatalog(sparkSession, v)
       case _ => throw SparkException.internalError(
         s"Failed to resolve identifier for creating metric view")
     }
+  }
+
+  private def createMetricViewInSessionCatalog(
+      sparkSession: SparkSession,
+      resolved: ResolvedIdentifier): Seq[Row] = {
+    val catalog = sparkSession.sessionState.catalog
+    val name = resolved.identifier.asTableIdentifier
     val analyzed = MetricViewHelper.analyzeMetricViewText(sparkSession, name, originalText)
 
     if (userSpecifiedColumns.nonEmpty) {
@@ -65,6 +76,60 @@ case class CreateMetricViewCommand(
       ignoreIfExists = allowExisting)
     Seq.empty
   }
+
+  private def createMetricViewInV2Catalog(
+      sparkSession: SparkSession,
+      resolved: ResolvedIdentifier): Seq[Row] = {
+    val tableCatalog = resolved.catalog.asTableCatalog
+    val ident = resolved.identifier
+    val name = ident.asTableIdentifier
+
+    val analyzed = MetricViewHelper.analyzeMetricViewText(sparkSession, name, originalText)
+
+    if (userSpecifiedColumns.nonEmpty) {
+      if (userSpecifiedColumns.length > analyzed.output.length) {
+        throw QueryCompilationErrors.cannotCreateViewNotEnoughColumnsError(
+          name, userSpecifiedColumns.map(_._1), analyzed)
+      } else if (userSpecifiedColumns.length < analyzed.output.length) {
+        throw QueryCompilationErrors.cannotCreateViewTooManyColumnsError(
+          name, userSpecifiedColumns.map(_._1), analyzed)
+      }
+    }
+
+    val schema = ViewHelper.aliasPlan(sparkSession, analyzed, userSpecifiedColumns).schema
+
+    val sourceTableFullName = extractSourceTable(originalText)
+
+    val tableProperties = new java.util.HashMap[String, String]()
+    tableProperties.put("table_type", "METRIC_VIEW")
+    tableProperties.put("view_definition", originalText)
+    sourceTableFullName.foreach(tableProperties.put("view.dependency", _))
+    comment.foreach(tableProperties.put("comment", _))
+    properties.foreach { case (k, v) => tableProperties.put(k, v) }
+
+    val columns = CatalogV2Util.structTypeToV2Columns(schema)
+
+    tableCatalog.createTable(
+      ident, columns, Array.empty[Transform], tableProperties)
+    Seq.empty
+  }
+
+  /**
+   * Extracts the source table three-part name from the metric view YAML.
+   * Only supports AssetSource (not SQLSource). Returns None if not extractable.
+   */
+  private def extractSourceTable(yaml: String): Option[String] = {
+    try {
+      val metricView = MetricViewFactory.fromYAML(yaml)
+      metricView.from match {
+        case asset: AssetSource => Some(asset.name)
+        case _ => None
+      }
+    } catch {
+      case _: Exception => None
+    }
+  }
+
   override protected def withNewChildInternal(newChild: LogicalPlan): LogicalPlan = {
     copy(child = newChild)
   }

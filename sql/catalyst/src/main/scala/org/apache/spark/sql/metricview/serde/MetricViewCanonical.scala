@@ -94,7 +94,7 @@ private[sql] object Source {
     if (sourceText.isEmpty) {
       throw MetricViewValidationException("Source cannot be empty")
     }
-    Try(CatalystSqlParser.parseTableIdentifier(sourceText)) match {
+    Try(CatalystSqlParser.parseMultipartIdentifier(sourceText)) match {
       case Success(_) => AssetSource(sourceText)
       case Failure(_) =>
         Try(CatalystSqlParser.parseQuery(sourceText)) match {
