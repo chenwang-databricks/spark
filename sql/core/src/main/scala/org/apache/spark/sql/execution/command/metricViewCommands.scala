@@ -23,8 +23,7 @@ import org.apache.spark.sql.catalyst.{QueryPlanningTracker, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis.{ResolvedIdentifier, SchemaUnsupported}
 import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.connector.catalog.CatalogV2Util
-import org.apache.spark.sql.connector.expressions.Transform
+import org.apache.spark.sql.connector.catalog.{CatalogV2Util, Dependency, DependencyList, TableInfo, TableSummary}
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.metricview.serde.{AssetSource, MetricViewFactory}
 import org.apache.spark.sql.metricview.util.MetricViewPlanner
@@ -97,20 +96,26 @@ case class CreateMetricViewCommand(
     }
 
     val schema = ViewHelper.aliasPlan(sparkSession, analyzed, userSpecifiedColumns).schema
-
+    val columns = CatalogV2Util.structTypeToV2Columns(schema)
     val sourceTableFullName = extractSourceTable(originalText)
 
     val tableProperties = new java.util.HashMap[String, String]()
-    tableProperties.put("table_type", "METRIC_VIEW")
-    tableProperties.put("view_definition", originalText)
-    sourceTableFullName.foreach(tableProperties.put("view.dependency", _))
     comment.foreach(tableProperties.put("comment", _))
     properties.foreach { case (k, v) => tableProperties.put(k, v) }
 
-    val columns = CatalogV2Util.structTypeToV2Columns(schema)
+    val deps = sourceTableFullName.map(name =>
+      DependencyList.of(Dependency.table(name))
+    ).orNull
 
-    tableCatalog.createTable(
-      ident, columns, Array.empty[Transform], tableProperties)
+    val tableInfo = new TableInfo.Builder()
+      .withColumns(columns)
+      .withProperties(tableProperties)
+      .withTableType(TableSummary.METRIC_VIEW_TABLE_TYPE)
+      .withViewDefinition(originalText)
+      .withViewDependencies(deps)
+      .build()
+
+    tableCatalog.createTable(ident, tableInfo)
     Seq.empty
   }
 

@@ -106,6 +106,7 @@ private[sql] object V1Table {
       case CatalogTableType.EXTERNAL => Some(TableSummary.EXTERNAL_TABLE_TYPE)
       case CatalogTableType.MANAGED => Some(TableSummary.MANAGED_TABLE_TYPE)
       case CatalogTableType.VIEW => Some(TableSummary.VIEW_TABLE_TYPE)
+      case CatalogTableType.METRIC_VIEW => Some(TableSummary.METRIC_VIEW_TABLE_TYPE)
       case _ => None
     }
   }
