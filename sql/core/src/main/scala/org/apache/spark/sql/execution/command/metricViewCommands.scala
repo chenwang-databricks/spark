@@ -21,11 +21,14 @@ import org.apache.spark.SparkException
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.{QueryPlanningTracker, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis.{ResolvedIdentifier, SchemaUnsupported}
-import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType, HiveTableRelation}
+import org.apache.spark.sql.catalyst.expressions.SubqueryExpression
+import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, View}
 import org.apache.spark.sql.connector.catalog.{CatalogV2Util, Dependency, DependencyList, TableInfo, TableSummary}
 import org.apache.spark.sql.errors.QueryCompilationErrors
-import org.apache.spark.sql.metricview.serde.{AssetSource, MetricViewFactory}
+import org.apache.spark.sql.execution.datasources.LogicalRelation
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
+import org.apache.spark.sql.metricview.serde.{AssetSource, MetricViewFactory, SQLSource}
 import org.apache.spark.sql.metricview.util.MetricViewPlanner
 import org.apache.spark.sql.types.StructType
 
@@ -97,15 +100,17 @@ case class CreateMetricViewCommand(
 
     val schema = ViewHelper.aliasPlan(sparkSession, analyzed, userSpecifiedColumns).schema
     val columns = CatalogV2Util.structTypeToV2Columns(schema)
-    val sourceTableFullName = extractSourceTable(originalText)
+    val sourceTableNames = extractSourceTables(originalText, analyzed)
 
     val tableProperties = new java.util.HashMap[String, String]()
     comment.foreach(tableProperties.put("comment", _))
     properties.foreach { case (k, v) => tableProperties.put(k, v) }
 
-    val deps = sourceTableFullName.map(name =>
-      DependencyList.of(Dependency.table(name))
-    ).orNull
+    val deps = if (sourceTableNames.nonEmpty) {
+      DependencyList.of(sourceTableNames.map(Dependency.table): _*)
+    } else {
+      null
+    }
 
     val tableInfo = new TableInfo.Builder()
       .withColumns(columns)
@@ -119,19 +124,15 @@ case class CreateMetricViewCommand(
     Seq.empty
   }
 
-  /**
-   * Extracts the source table three-part name from the metric view YAML.
-   * Only supports AssetSource (not SQLSource). Returns None if not extractable.
-   */
-  private def extractSourceTable(yaml: String): Option[String] = {
+  private def extractSourceTables(yaml: String, analyzed: LogicalPlan): Seq[String] = {
     try {
       val metricView = MetricViewFactory.fromYAML(yaml)
       metricView.from match {
-        case asset: AssetSource => Some(asset.name)
-        case _ => None
+        case asset: AssetSource => Seq(asset.name)
+        case _: SQLSource => MetricViewHelper.collectTableDependencies(analyzed)
       }
     } catch {
-      case _: Exception => None
+      case _: Exception => Seq.empty
     }
   }
 
@@ -143,6 +144,37 @@ case class CreateMetricViewCommand(
 case class AlterMetricViewCommand(child: LogicalPlan, originalText: String)
 
 object MetricViewHelper {
+
+  /**
+   * Walks the analyzed plan to collect direct table/view dependencies.
+   * Stops recursion at relation leaf nodes and persistent View nodes so that only
+   * direct (not transitive) dependencies are recorded.
+   */
+  private[execution] def collectTableDependencies(plan: LogicalPlan): Seq[String] = {
+    val tables = scala.collection.mutable.ArrayBuffer.empty[String]
+    def traverse(p: LogicalPlan): Unit = p match {
+      case v: View if !v.isTempView =>
+        tables += v.desc.identifier.unquotedString
+      case r: DataSourceV2Relation if r.catalog.isDefined && r.identifier.isDefined =>
+        val cat = r.catalog.get.name()
+        val ns = r.identifier.get.namespace().mkString(".")
+        val name = r.identifier.get.name()
+        tables += s"$cat.$ns.$name"
+      case r: HiveTableRelation =>
+        tables += r.tableMeta.identifier.unquotedString
+      case r: LogicalRelation if r.catalogTable.isDefined =>
+        tables += r.catalogTable.get.identifier.unquotedString
+      case other =>
+        other.children.foreach(traverse)
+        other.expressions.foreach(_.foreach {
+          case s: SubqueryExpression => traverse(s.plan)
+          case _ =>
+        })
+    }
+    traverse(plan)
+    tables.distinct.toSeq
+  }
+
   def analyzeMetricViewText(
       session: SparkSession,
       name: TableIdentifier,
