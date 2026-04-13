@@ -156,7 +156,6 @@ case class AnalysisContext(
     referredTempVariableNames: Seq[Seq[String]] = Seq.empty,
     outerPlan: Option[LogicalPlan] = None,
     collation: Option[String] = None,
-    metricViewId: Option[String] = None,
 
     /**
      * This is a bridge state between this fixed-point [[Analyzer]] and a single-pass [[Resolver]].
@@ -194,12 +193,7 @@ object AnalysisContext {
     value.get.setSinglePassResolverBridgeState(prevSinglePassResolverBridgeState)
   }
 
-  private[sql] def set(context: AnalysisContext): Unit = value.set(context)
-
-  def setMetricViewId(viewId: String): Unit = {
-    val ctx = get
-    set(ctx.copy(metricViewId = Some(viewId)))
-  }
+  private def set(context: AnalysisContext): Unit = value.set(context)
 
   def withAnalysisContext[A](viewDesc: CatalogTable)(f: => A): A = {
     val originContext = value.get()
