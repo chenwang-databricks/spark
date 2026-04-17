@@ -24,7 +24,6 @@ import org.apache.spark.annotation.Evolving;
 /**
  * A list of dependencies for a SQL object such as a view or metric view.
  * <p>
- * This mirrors the Databricks Unity Catalog {@code DependencyList} model:
  * <ul>
  *   <li>When {@code null}, the dependency information is not provided.</li>
  *   <li>When the array is empty, dependencies are provided but the object has none.</li>

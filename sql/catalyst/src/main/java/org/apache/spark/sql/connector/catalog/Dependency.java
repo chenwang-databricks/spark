@@ -23,8 +23,6 @@ import org.apache.spark.annotation.Evolving;
  * Represents a dependency of a SQL object such as a view or metric view.
  * <p>
  * A dependency is one of: {@link TableDependency} or {@link FunctionDependency}.
- * This mirrors the Databricks Unity Catalog dependency model where each dependency
- * identifies a specific securable object that the parent object depends on.
  *
  * @since 4.2.0
  */

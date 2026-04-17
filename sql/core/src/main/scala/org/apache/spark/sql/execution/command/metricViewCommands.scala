@@ -24,11 +24,11 @@ import org.apache.spark.sql.catalyst.analysis.{ResolvedIdentifier, SchemaUnsuppo
 import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType, HiveTableRelation}
 import org.apache.spark.sql.catalyst.expressions.SubqueryExpression
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, View}
-import org.apache.spark.sql.connector.catalog.{CatalogV2Util, Dependency, DependencyList, TableInfo, TableSummary}
+import org.apache.spark.sql.connector.catalog.{CatalogV2Util, Dependency, DependencyList, TableCatalog, TableInfo, TableSummary}
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
-import org.apache.spark.sql.metricview.serde.{AssetSource, MetricViewFactory, SQLSource}
+import org.apache.spark.sql.metricview.serde.MetricViewFactory
 import org.apache.spark.sql.metricview.util.MetricViewPlanner
 import org.apache.spark.sql.types.StructType
 
@@ -100,11 +100,25 @@ case class CreateMetricViewCommand(
 
     val schema = ViewHelper.aliasPlan(sparkSession, analyzed, userSpecifiedColumns).schema
     val columns = CatalogV2Util.structTypeToV2Columns(schema)
-    val sourceTableNames = extractSourceTables(originalText, analyzed)
+    val sourceTableNames = MetricViewHelper.collectTableDependencies(analyzed)
+
+    // Mirror what the V1 path produces via ViewHelper.prepareTable: capture the
+    // create-time catalog/namespace and SQL configs so the view text can be
+    // re-parsed and resolved consistently when the metric view is loaded later.
+    val viewProps = ViewHelper.generateViewProperties(
+      properties, sparkSession,
+      analyzed.schema.fieldNames, schema.fieldNames,
+      SchemaUnsupported)
+
+    // Describe this metric view's source and filter as table properties so
+    // catalogs and tools can inspect them without re-parsing the YAML.
+    val metricView = MetricViewFactory.fromYAML(originalText)
+    val metricViewProps = metricView.getProperties
 
     val tableProperties = new java.util.HashMap[String, String]()
-    comment.foreach(tableProperties.put("comment", _))
-    properties.foreach { case (k, v) => tableProperties.put(k, v) }
+    comment.foreach(tableProperties.put(TableCatalog.PROP_COMMENT, _))
+    viewProps.foreach { case (k, v) => tableProperties.put(k, v) }
+    metricViewProps.foreach { case (k, v) => tableProperties.put(k, v) }
 
     val deps = if (sourceTableNames.nonEmpty) {
       DependencyList.of(sourceTableNames.map(Dependency.table): _*)
@@ -122,18 +136,6 @@ case class CreateMetricViewCommand(
 
     tableCatalog.createTable(ident, tableInfo)
     Seq.empty
-  }
-
-  private def extractSourceTables(yaml: String, analyzed: LogicalPlan): Seq[String] = {
-    try {
-      val metricView = MetricViewFactory.fromYAML(yaml)
-      metricView.from match {
-        case asset: AssetSource => Seq(asset.name)
-        case _: SQLSource => MetricViewHelper.collectTableDependencies(analyzed)
-      }
-    } catch {
-      case _: Exception => Seq.empty
-    }
   }
 
   override protected def withNewChildInternal(newChild: LogicalPlan): LogicalPlan = {
