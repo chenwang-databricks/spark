@@ -19,7 +19,7 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog, TableSummary}
+import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.util.ArrayImplicits._
 
@@ -35,21 +35,6 @@ case class DropTableExec(
 
   override def run(): Seq[InternalRow] = {
     if (catalog.tableExists(ident)) {
-      val table = catalog.loadTable(ident)
-      val tableType = Option(table.properties().get(TableCatalog.PROP_TABLE_TYPE)).orNull
-      // Metric views are stored as tables in V2 catalogs but must be dropped via DROP VIEW.
-      if (TableSummary.METRIC_VIEW_TABLE_TYPE.equals(tableType)) {
-        val qualified =
-          (catalog.name() +: ident.namespace() :+ ident.name()).mkString(".")
-        throw QueryCompilationErrors.wrongCommandForObjectTypeError(
-          operation = "DROP TABLE",
-          requiredType =
-            s"${TableSummary.EXTERNAL_TABLE_TYPE} or ${TableSummary.MANAGED_TABLE_TYPE}",
-          objectName = qualified,
-          foundType = TableSummary.METRIC_VIEW_TABLE_TYPE,
-          alternative = "DROP VIEW"
-        )
-      }
       invalidateCache()
       if (purge) catalog.purgeTable(ident) else catalog.dropTable(ident)
     } else if (!ifExists) {
