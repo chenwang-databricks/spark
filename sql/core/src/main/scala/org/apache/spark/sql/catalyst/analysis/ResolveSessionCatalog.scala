@@ -303,12 +303,10 @@ class ResolveSessionCatalog(val catalogManager: CatalogManager)
     case DropView(DropViewInSessionCatalog(ident), ifExists) =>
       DropTableCommand(ident, ifExists, isView = true, purge = false)
 
-    case DropView(r @ ResolvedIdentifier(catalog, ident), _) =>
-      if (catalog == FakeSystemCatalog) {
-        DropTempViewCommand(ident)
-      } else {
-        throw QueryCompilationErrors.catalogOperationNotSupported(catalog, "views")
-      }
+    case DropView(ResolvedIdentifier(FakeSystemCatalog, ident), _) =>
+      DropTempViewCommand(ident)
+    // For other V2 catalogs we fall through to DataSourceV2Strategy, which routes the
+    // command to DropMetricViewExec (metric views are stored as tables on the catalog).
 
     case c @ CreateNamespace(DatabaseNameInSessionCatalog(name), _, _) if conf.useV1Command =>
       val comment = c.properties.get(SupportsNamespaces.PROP_COMMENT)

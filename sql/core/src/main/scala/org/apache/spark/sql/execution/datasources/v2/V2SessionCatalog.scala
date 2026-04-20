@@ -334,8 +334,10 @@ class V2SessionCatalog(catalog: SessionCatalog)
   private def dropTableInternal(ident: Identifier, purge: Boolean = false): Boolean = {
     try {
       loadTable(ident) match {
-        case V1Table(v1Table) if v1Table.tableType == CatalogTableType.VIEW &&
-            !SQLConf.get.getConf(SQLConf.DROP_TABLE_VIEW_ENABLED) =>
+        case V1Table(v1Table)
+            if (v1Table.tableType == CatalogTableType.VIEW &&
+              !SQLConf.get.getConf(SQLConf.DROP_TABLE_VIEW_ENABLED)) ||
+              v1Table.tableType == CatalogTableType.METRIC_VIEW =>
           throw QueryCompilationErrors.wrongCommandForObjectTypeError(
             operation = "DROP TABLE",
             requiredType = s"${CatalogTableType.EXTERNAL.name} or" +
