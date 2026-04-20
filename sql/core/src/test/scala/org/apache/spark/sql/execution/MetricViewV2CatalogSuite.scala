@@ -73,9 +73,7 @@ class MetricViewV2CatalogSuite extends QueryTest with SharedSparkSession {
            |USING foo AS SELECT * FROM metric_view_v2_source""".stripMargin)
       body
     } finally {
-      // Metric views are stored as tables on the V2 catalog. Until DROP VIEW
-      // routing for metric views is added (follow-up PR), use DROP TABLE here.
-      sql(s"DROP TABLE IF EXISTS $fullMetricViewName")
+      sql(s"DROP VIEW IF EXISTS $fullMetricViewName")
       sql(s"DROP TABLE IF EXISTS $fullSourceTableName")
       spark.catalog.dropTempView("metric_view_v2_source")
       MetricViewRecordingCatalog.reset()
@@ -155,6 +153,52 @@ class MetricViewV2CatalogSuite extends QueryTest with SharedSparkSession {
         .count()
       assert(sqlConfigKeys > 0,
         s"Expected at least one ${CatalogTable.VIEW_SQL_CONFIG_PREFIX}* property in $props")
+    }
+  }
+
+  test("DROP VIEW succeeds on a V2 metric view; DROP TABLE rejects it") {
+    withTestCatalogTables {
+      val metricView = MetricView(
+        "0.1",
+        AssetSource(fullSourceTableName),
+        where = None,
+        select = metricViewColumns)
+      createMetricView(fullMetricViewName, metricView)
+      val ident = Identifier.of(Array(testNamespace), metricViewName)
+
+      // DROP TABLE on a metric view must fail with WRONG_COMMAND_FOR_OBJECT_TYPE.
+      val dropTableEx = intercept[org.apache.spark.sql.AnalysisException] {
+        sql(s"DROP TABLE $fullMetricViewName")
+      }
+      assert(dropTableEx.getCondition === "WRONG_COMMAND_FOR_OBJECT_TYPE")
+      assert(dropTableEx.getMessage.contains("DROP VIEW"))
+
+      // The metric view must still exist after the failed DROP TABLE.
+      assert(MetricViewRecordingCatalog.captured.containsKey(ident))
+
+      // DROP VIEW on a metric view must succeed.
+      sql(s"DROP VIEW $fullMetricViewName")
+      // The catalog no longer carries the underlying table either.
+      assert(!sql(s"SHOW TABLES IN $testCatalogName.$testNamespace")
+        .where("tableName = 'mv'")
+        .collect().nonEmpty)
+    }
+  }
+
+  test("DROP VIEW IF EXISTS on a non-existent V2 metric view is a no-op") {
+    withTestCatalogTables {
+      sql(s"DROP VIEW IF EXISTS $testCatalogName.$testNamespace.does_not_exist")
+    }
+  }
+
+  test("DROP VIEW on a regular V2 table fails with WRONG_COMMAND_FOR_OBJECT_TYPE") {
+    withTestCatalogTables {
+      // Source table is a regular table, not a metric view.
+      val ex = intercept[org.apache.spark.sql.AnalysisException] {
+        sql(s"DROP VIEW $fullSourceTableName")
+      }
+      assert(ex.getCondition === "WRONG_COMMAND_FOR_OBJECT_TYPE")
+      assert(ex.getMessage.contains("DROP TABLE"))
     }
   }
 
