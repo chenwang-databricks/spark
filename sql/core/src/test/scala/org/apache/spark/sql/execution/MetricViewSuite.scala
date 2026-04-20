@@ -18,6 +18,8 @@
 package org.apache.spark.sql.execution
 
 import org.apache.spark.sql.{AnalysisException, QueryTest}
+import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.execution.command.MetricViewHelper
 import org.apache.spark.sql.metricview.serde.{AssetSource, Column, DimensionExpression, MeasureExpression, MetricView, MetricViewFactory, SQLSource}
 import org.apache.spark.sql.test.{SharedSparkSession, SQLTestUtils}
 
@@ -431,6 +433,99 @@ abstract class MetricViewSuite extends QueryTest with SQLTestUtils {
 
       // Verify that distinct values are the same as the original
       checkAnswer(unionDf.distinct(), df)
+    }
+  }
+
+  private def analyzeAndCollectDeps(yaml: String): Seq[String] = {
+    val viewName = TableIdentifier("dep_test_view", Some("default"))
+    val analyzed = MetricViewHelper.analyzeMetricViewText(spark, viewName, yaml)
+    MetricViewHelper.collectTableDependencies(analyzed)
+  }
+
+  test("SQL source dependency extraction - single table") {
+    val columns = Seq(
+      Column("region", DimensionExpression("region"), 0),
+      Column("count_sum", MeasureExpression("sum(count)"), 1)
+    )
+    val metricView = MetricView(
+      "0.1", SQLSource(s"SELECT * FROM $testTableName"), None, columns)
+    val yaml = MetricViewFactory.toYAML(metricView)
+    val deps = analyzeAndCollectDeps(yaml)
+    assert(deps.length == 1, s"Expected 1 dependency, got ${deps.length}: $deps")
+    assert(deps.head.endsWith(testTableName),
+      s"Expected dependency to reference $testTableName, got ${deps.head}")
+  }
+
+  test("SQL source dependency extraction - JOIN (multiple tables)") {
+    val secondTable = "test_table_customers"
+    withTable(secondTable) {
+      Seq((1, "Alice"), (2, "Bob")).toDF("id", "name")
+        .write.saveAsTable(secondTable)
+
+      val columns = Seq(
+        Column("name", DimensionExpression("name"), 0),
+        Column("count_sum", MeasureExpression("sum(count)"), 1)
+      )
+      val joinSql =
+        s"SELECT c.name, t.count FROM $testTableName t JOIN $secondTable c ON t.count = c.id"
+      val metricView = MetricView("0.1", SQLSource(joinSql), None, columns)
+      val yaml = MetricViewFactory.toYAML(metricView)
+      val deps = analyzeAndCollectDeps(yaml)
+
+      assert(deps.length == 2, s"Expected 2 dependencies, got ${deps.length}: $deps")
+      assert(deps.exists(_.endsWith(testTableName)),
+        s"Expected dependency on $testTableName in $deps")
+      assert(deps.exists(_.endsWith(secondTable)),
+        s"Expected dependency on $secondTable in $deps")
+    }
+  }
+
+  test("SQL source dependency extraction - subquery") {
+    val columns = Seq(
+      Column("region", DimensionExpression("region"), 0),
+      Column("count_sum", MeasureExpression("sum(count)"), 1)
+    )
+    val subquerySql =
+      s"SELECT * FROM $testTableName WHERE count > (SELECT avg(count) FROM $testTableName)"
+    val metricView = MetricView("0.1", SQLSource(subquerySql), None, columns)
+    val yaml = MetricViewFactory.toYAML(metricView)
+    val deps = analyzeAndCollectDeps(yaml)
+
+    assert(deps.length == 1,
+      s"Expected 1 dependency (deduplicated), got ${deps.length}: $deps")
+    assert(deps.head.endsWith(testTableName),
+      s"Expected dependency to reference $testTableName, got ${deps.head}")
+  }
+
+  test("SQL source dependency extraction - self-join deduplication") {
+    val columns = Seq(
+      Column("region", DimensionExpression("a_region"), 0),
+      Column("count_sum", MeasureExpression("sum(a_count)"), 1)
+    )
+    val selfJoinSql =
+      s"""SELECT a.region AS a_region, a.count AS a_count
+         |FROM $testTableName a JOIN $testTableName b ON a.region = b.region""".stripMargin
+    val metricView = MetricView("0.1", SQLSource(selfJoinSql), None, columns)
+    val yaml = MetricViewFactory.toYAML(metricView)
+    val deps = analyzeAndCollectDeps(yaml)
+
+    assert(deps.length == 1,
+      s"Expected 1 dependency (self-join deduplicated), got ${deps.length}: $deps")
+    assert(deps.head.endsWith(testTableName),
+      s"Expected dependency to reference $testTableName, got ${deps.head}")
+  }
+
+  test("AssetSource dependency extraction still works") {
+    val columns = Seq(
+      Column("region", DimensionExpression("region"), 0),
+      Column("count_sum", MeasureExpression("sum(count)"), 1)
+    )
+    val metricView = MetricView("0.1", AssetSource(testTableName), None, columns)
+    val yaml = MetricViewFactory.toYAML(metricView)
+    val mv = MetricViewFactory.fromYAML(yaml)
+    mv.from match {
+      case asset: AssetSource => assert(asset.name == testTableName)
+      case other => fail(s"Expected AssetSource, got $other")
     }
   }
 }
