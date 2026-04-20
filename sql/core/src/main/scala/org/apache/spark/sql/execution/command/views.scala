@@ -799,19 +799,14 @@ object ViewHelper extends SQLConfHelper with Logging with CapturesConfig {
     val newProperties = generateViewProperties(
       properties, session, analyzedPlan.schema.fieldNames, aliasedSchema.fieldNames, viewSchemaMode)
 
-    // Add property to indicate if this is a metric view
-    val finalProperties = if (isMetricView) {
-      newProperties + (CatalogTable.VIEW_WITH_METRICS -> "true")
-    } else {
-      newProperties
-    }
+    val tableType = if (isMetricView) CatalogTableType.METRIC_VIEW else CatalogTableType.VIEW
 
     CatalogTable(
       identifier = name,
-      tableType = CatalogTableType.VIEW,
+      tableType = tableType,
       storage = CatalogStorageFormat.empty,
       schema = aliasedSchema,
-      properties = finalProperties,
+      properties = newProperties,
       viewOriginalText = originalText,
       viewText = originalText,
       comment = comment,

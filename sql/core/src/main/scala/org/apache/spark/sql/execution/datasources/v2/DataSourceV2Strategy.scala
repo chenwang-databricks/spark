@@ -33,7 +33,7 @@ import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.util.{toPrettySQL, GeneratedColumn, IdentityColumn, ResolveDefaultColumns, ResolveTableConstraints, V2ExpressionBuilder}
 import org.apache.spark.sql.classic.SparkSession
-import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsDeleteV2, SupportsNamespaces, SupportsPartitionManagement, SupportsWrite, TableCapability, TableCatalog, TruncatableTable}
+import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsDeleteV2, SupportsNamespaces, SupportsPartitionManagement, SupportsWrite, TableCapability, TableCatalog, TableSummary, TruncatableTable}
 import org.apache.spark.sql.connector.catalog.TableChange
 import org.apache.spark.sql.connector.catalog.index.SupportsIndex
 import org.apache.spark.sql.connector.expressions.{FieldReference, LiteralValue}
@@ -95,6 +95,23 @@ class DataSourceV2Strategy(session: SparkSession) extends Strategy with Predicat
   private def invalidateCache(catalog: TableCatalog, ident: Identifier): Unit = {
     val nameParts = ident.toQualifiedNameParts(catalog)
     cacheManager.uncacheTableOrView(session, nameParts, cascade = true)
+  }
+
+  /**
+   * Returns true if `ident` resolves to a metric view in `catalog`. Returns false if the table
+   * does not exist or carries no `table_type` property identifying it as a metric view.
+   */
+  private def isMetricView(catalog: TableCatalog, ident: Identifier): Boolean = {
+    if (!catalog.tableExists(ident)) {
+      return false
+    }
+    val table = catalog.loadTable(ident)
+    TableSummary.METRIC_VIEW_TABLE_TYPE.equals(
+      table.properties().get(TableCatalog.PROP_TABLE_TYPE))
+  }
+
+  private def qualifiedName(catalog: TableCatalog, ident: Identifier): String = {
+    (catalog.name() +: ident.namespace() :+ ident.name()).mkString(".")
   }
 
   private def makeQualifiedDBObjectPath(location: String): String = {
@@ -396,8 +413,38 @@ class DataSourceV2Strategy(session: SparkSession) extends Strategy with Predicat
       }
 
     case DropTable(r: ResolvedIdentifier, ifExists, purge) =>
+      val tableCatalog = r.catalog.asTableCatalog
+      // Metric views are stored as tables but must be dropped via DROP VIEW. Reject the
+      // command at planning time when the resolved target is a metric view so the user
+      // gets a clear "use DROP VIEW" error before any drop side-effect runs.
+      if (isMetricView(tableCatalog, r.identifier)) {
+        throw QueryCompilationErrors.wrongCommandForObjectTypeError(
+          operation = "DROP TABLE",
+          requiredType =
+            s"${TableSummary.EXTERNAL_TABLE_TYPE} or ${TableSummary.MANAGED_TABLE_TYPE}",
+          objectName = qualifiedName(tableCatalog, r.identifier),
+          foundType = TableSummary.METRIC_VIEW_TABLE_TYPE,
+          alternative = "DROP VIEW"
+        )
+      }
       val invalidateFunc = () => CommandUtils.uncacheTableOrView(session, r)
-      DropTableExec(r.catalog.asTableCatalog, r.identifier, ifExists, purge, invalidateFunc) :: Nil
+      DropTableExec(tableCatalog, r.identifier, ifExists, purge, invalidateFunc) :: Nil
+
+    case DropView(r: ResolvedIdentifier, ifExists) =>
+      val tableCatalog = r.catalog.asTableCatalog
+      if (!tableCatalog.tableExists(r.identifier) || isMetricView(tableCatalog, r.identifier)) {
+        // Either the target does not exist (let DropMetricViewExec honor IF EXISTS) or it
+        // is a metric view (the only V2 object DROP VIEW currently supports).
+        DropMetricViewExec(tableCatalog, r.identifier, ifExists) :: Nil
+      } else {
+        throw QueryCompilationErrors.wrongCommandForObjectTypeError(
+          operation = "DROP VIEW",
+          requiredType = TableSummary.METRIC_VIEW_TABLE_TYPE,
+          objectName = qualifiedName(tableCatalog, r.identifier),
+          foundType = TableSummary.MANAGED_TABLE_TYPE,
+          alternative = "DROP TABLE"
+        )
+      }
 
     case _: NoopCommand =>
       LocalTableScanExec(Nil, Nil, None) :: Nil
